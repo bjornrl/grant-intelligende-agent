@@ -67,7 +67,7 @@ const getCatMeta = (key) =>
 const INITIAL_SOURCES = {
   funding: [
     { id: "dam",       name: "DAM Stiftelsen",      url: "https://www.dam.no/organisasjoner/", active: true,  tag: "Health",   color: T.green  },
-    { id: "extra",     name: "Extrastiftelsen",      url: "https://www.extrastiftelsen.no",     active: true,  tag: "Health",   color: T.green  },
+    { id: "extra",     name: "Dam Stiftelsen (DM)",  url: "https://www.dmstiftelsen.no",        active: true,  tag: "Health",   color: T.green  },
     { id: "kulturrad", name: "Kulturrådet",          url: "https://www.kulturradet.no",         active: false, tag: "Culture",  color: T.purple },
     { id: "innov",     name: "Innovasjon Norge",     url: "https://www.innovasjonnorge.no",     active: true,  tag: "Business", color: T.amber  },
     { id: "nfr",       name: "Norsk Forskningsråd", url: "https://www.forskningsradet.no",     active: false, tag: "Research", color: T.accent },
@@ -295,8 +295,8 @@ function OverviewTab({ sources, matches }) {
                 <div style={{ flex: 1, minWidth: 0 }}>
                   <div style={{ fontSize: 13, fontWeight: 600, color: T.text, marginBottom: 4 }}>{m.fund}</div>
                   <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
-                    <LinkChip href={m.fundUrl} label="Funder" color={T.green} />
-                    <LinkChip href={m.newsUrl} label={m.news?.split("(")[0]?.trim() || "News"} color={T.amber} />
+                    <LinkChip href={m.fundUrl} label="Grant" color={T.green} />
+                    <LinkChip href={m.newsUrl} label="Articles" color={T.amber} />
                     <LinkChip href={m.orgUrl}  label={m.org  || "Org"}  color={T.accent} />
                   </div>
                 </div>
@@ -328,6 +328,9 @@ function OverviewTab({ sources, matches }) {
 // ── Tab: Sources ──────────────────────────────────────────────────────────
 function SourcesTab({ sources, setSources, showToast }) {
   const [showForm,     setShowForm]     = useState(false);
+  const [showBulk,     setShowBulk]     = useState(false);
+  const [bulkText,     setBulkText]     = useState("");
+  const [bulkCat,      setBulkCat]      = useState("organizations");
   const [focusedField, setFocusedField] = useState(null);
   const [newCat,       setNewCat]       = useState("");
   const [form,         setForm]         = useState({
@@ -382,6 +385,47 @@ function SourcesTab({ sources, setSources, showToast }) {
     setNewCat("");
     setShowForm(false);
     showToast(`Added "${source.name}" to ${cat}`, "success");
+  };
+
+  // ── Bulk import ──────────────────────────────────────────────────────────
+  const handleBulkImport = () => {
+    const cat = bulkCat.trim().toLowerCase().replace(/\s+/g, "_") || "organizations";
+    const meta = getCatMeta(cat);
+    const lines = bulkText.split("\n").map(l => l.trim()).filter(Boolean);
+    const added = [];
+
+    for (const line of lines) {
+      // Detect URL in line — anything starting with http or www
+      const urlMatch = line.match(/(https?:\/\/[^\s,]+|www\.[^\s,]+)/i);
+      const url = urlMatch ? (urlMatch[1].startsWith("http") ? urlMatch[1] : `https://${urlMatch[1]}`) : "";
+      // Name = everything before the URL (strip comma/pipe separators), or derive from URL
+      const namePart = urlMatch ? line.slice(0, urlMatch.index).replace(/[,|–-]+$/, "").trim() : line;
+      const name = namePart || (url ? new URL(url).hostname.replace(/^www\./, "") : "");
+      if (!name && !url) continue;
+
+      const source = {
+        id:     `bulk_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
+        name,
+        url:    url || "",
+        active: true,
+        tag:    "",
+        color:  meta.color,
+      };
+      added.push(source);
+    }
+
+    if (!added.length) { showToast("No valid lines found — use: Name, https://url.no", "warn"); return; }
+
+    setSources(prev => ({
+      ...prev,
+      [cat]: [...(prev[cat] || []), ...added],
+    }));
+
+    if (supabaseEnabled) added.forEach(s => upsertSource(cat, s));
+
+    setBulkText("");
+    setShowBulk(false);
+    showToast(`Imported ${added.length} organisation${added.length !== 1 ? "s" : ""} into "${cat}"`, "success");
   };
 
   return (
@@ -549,22 +593,99 @@ function SourcesTab({ sources, setSources, showToast }) {
             >Add Source</button>
           </div>
         </div>
+      ) : showBulk ? (
+        /* ── Bulk import form ── */
+        <div className="fade-up" style={{
+          background: T.card, border: `1px solid ${T.accent}40`, borderRadius: 12, padding: 24,
+        }}>
+          <h3 style={{ fontSize: 14, fontWeight: 600, marginBottom: 4 }}>Bulk Import Organisations</h3>
+          <p style={{ fontSize: 12, color: T.muted, marginBottom: 16, lineHeight: 1.6 }}>
+            One organisation per line. Format: <span style={{ fontFamily: "DM Mono", color: T.text }}>Name, https://url.no</span><br/>
+            URL is optional — you can also paste just names.
+          </p>
+
+          {/* Category selector */}
+          <div style={{ marginBottom: 12 }}>
+            <label style={{ fontSize: 11, color: T.muted, fontWeight: 600, display: "block", marginBottom: 6, letterSpacing: "0.04em" }}>
+              IMPORT INTO CATEGORY
+            </label>
+            <input
+              value={bulkCat}
+              onChange={e => setBulkCat(e.target.value)}
+              placeholder="organizations"
+              style={inputStyle(focusedField === "bulkCat")}
+              onFocus={() => setFocusedField("bulkCat")}
+              onBlur={() =>  setFocusedField(null)}
+            />
+          </div>
+
+          {/* Textarea */}
+          <div style={{ marginBottom: 16 }}>
+            <label style={{ fontSize: 11, color: T.muted, fontWeight: 600, display: "block", marginBottom: 6, letterSpacing: "0.04em" }}>
+              ORGANISATIONS (one per line)
+            </label>
+            <textarea
+              value={bulkText}
+              onChange={e => setBulkText(e.target.value)}
+              placeholder={"Mental Helse Norge, https://www.mentalhelse.no\nNorges Røde Kors, https://www.rodekors.no\nKirkeens Bymisjon"}
+              rows={8}
+              style={{
+                ...inputStyle(focusedField === "bulkText"),
+                width: "100%", resize: "vertical", fontFamily: "DM Mono",
+                fontSize: 12, lineHeight: 1.6, boxSizing: "border-box",
+              }}
+              onFocus={() => setFocusedField("bulkText")}
+              onBlur={() =>  setFocusedField(null)}
+            />
+          </div>
+
+          <div style={{ display: "flex", gap: 10, justifyContent: "flex-end" }}>
+            <button
+              type="button"
+              onClick={() => { setShowBulk(false); setBulkText(""); }}
+              style={{ padding: "10px 20px", borderRadius: 8, border: `1px solid ${T.border}`, background: "transparent", color: T.muted, fontSize: 13, cursor: "pointer" }}
+            >Cancel</button>
+            <button
+              type="button"
+              onClick={handleBulkImport}
+              style={{ padding: "10px 20px", borderRadius: 8, border: "none", background: T.accent, color: "#fff", fontSize: 13, fontWeight: 600, cursor: "pointer" }}
+            >Import All</button>
+          </div>
+        </div>
       ) : (
-        <button
-          type="button"
-          onClick={() => setShowForm(true)}
-          style={{
-            padding: "16px", borderRadius: 12, border: `1.5px dashed ${T.borderHi}`,
-            background: "transparent", color: T.muted, fontSize: 13, cursor: "pointer",
-            display: "flex", alignItems: "center", justifyContent: "center", gap: 8,
-            transition: "all 0.15s",
-          }}
-          onMouseOver={e => { e.currentTarget.style.borderColor = T.accent; e.currentTarget.style.color = T.accent; }}
-          onMouseOut={e =>  { e.currentTarget.style.borderColor = T.borderHi; e.currentTarget.style.color = T.muted; }}
-        >
-          <span style={{ fontSize: 18 }}>+</span>
-          Add Source &mdash; website, organisation, funder, news outlet…
-        </button>
+        /* ── Bottom action row ── */
+        <div style={{ display: "flex", gap: 12 }}>
+          <button
+            type="button"
+            onClick={() => setShowForm(true)}
+            style={{
+              flex: 1, padding: "16px", borderRadius: 12, border: `1.5px dashed ${T.borderHi}`,
+              background: "transparent", color: T.muted, fontSize: 13, cursor: "pointer",
+              display: "flex", alignItems: "center", justifyContent: "center", gap: 8,
+              transition: "all 0.15s",
+            }}
+            onMouseOver={e => { e.currentTarget.style.borderColor = T.accent; e.currentTarget.style.color = T.accent; }}
+            onMouseOut={e =>  { e.currentTarget.style.borderColor = T.borderHi; e.currentTarget.style.color = T.muted; }}
+          >
+            <span style={{ fontSize: 18 }}>+</span>
+            Add single source
+          </button>
+          <button
+            type="button"
+            onClick={() => setShowBulk(true)}
+            style={{
+              flex: 1, padding: "16px", borderRadius: 12, border: `1.5px dashed ${T.borderHi}`,
+              background: "transparent", color: T.muted, fontSize: 13, cursor: "pointer",
+              display: "flex", alignItems: "center", justifyContent: "center", gap: 8,
+              transition: "all 0.15s",
+            }}
+            onMouseOver={e => { e.currentTarget.style.borderColor = T.purple; e.currentTarget.style.color = T.purple; }}
+            onMouseOut={e =>  { e.currentTarget.style.borderColor = T.borderHi; e.currentTarget.style.color = T.muted; }}
+          >
+            <span style={{ fontSize: 18 }}>⬆</span>
+            Bulk import organisations
+          </button>
+        </div>
       )}
     </div>
   );
@@ -670,9 +791,9 @@ function MatchesTab({ matches, deliveryEmail, showToast }) {
     setSending(true);
     try {
       const linkRow = [
-        selected.fundUrl ? `<a href="${selected.fundUrl}">🔗 Funder page</a>` : "",
-        selected.newsUrl ? `<a href="${selected.newsUrl}">🔗 News source</a>` : "",
-        selected.orgUrl  ? `<a href="${selected.orgUrl}">🔗 Organisation</a>` : "",
+        selected.fundUrl ? `<a href="${selected.fundUrl}">🔍 Grant search</a>` : "",
+        selected.newsUrl ? `<a href="${selected.newsUrl}">📰 Find articles</a>` : "",
+        selected.orgUrl  ? `<a href="${selected.orgUrl}">🏢 Organisation</a>` : "",
       ].filter(Boolean).join(" &nbsp;|&nbsp; ");
 
       const html = `
@@ -686,6 +807,7 @@ function MatchesTab({ matches, deliveryEmail, showToast }) {
         <hr/>
         <p style="font-family:sans-serif"><strong>News alignment:</strong> ${selected.news}</p>
         <p style="font-family:sans-serif"><strong>Insight:</strong> ${selected.insight}</p>
+        ${selected.explanation ? `<p style="font-family:sans-serif;background:#f0f4ff;padding:12px 16px;border-radius:8px;border-left:3px solid #5b8dee"><strong>Why this match:</strong><br/>${selected.explanation}</p>` : ""}
         <p style="font-family:sans-serif"><strong>Contact:</strong> ${selected.org} — ${selected.contact}</p>
         <hr/>
         <h3 style="font-family:sans-serif">Draft Proposal</h3>
@@ -780,9 +902,9 @@ function MatchesTab({ matches, deliveryEmail, showToast }) {
 
                 {/* Link chips */}
                 <div style={{ display: "flex", gap: 6, flexWrap: "wrap", marginBottom: 12 }}>
-                  <LinkChip href={m.fundUrl} label="💰 Funder page"  color={T.green}  />
-                  <LinkChip href={m.newsUrl} label="📰 News source"  color={T.amber}  />
-                  <LinkChip href={m.orgUrl}  label="🏢 Organisation" color={T.accent} />
+                  <LinkChip href={m.fundUrl} label="🔍 Grant search"  color={T.green}  />
+                  <LinkChip href={m.newsUrl} label="📰 Find articles" color={T.amber}  />
+                  <LinkChip href={m.orgUrl}  label="🏢 Organisation"  color={T.accent} />
                 </div>
 
                 {/* Meta row */}
@@ -801,10 +923,26 @@ function MatchesTab({ matches, deliveryEmail, showToast }) {
       <div style={{ width: 360, flexShrink: 0 }}>
         {selected ? (
           <div style={{ background: T.card, border: `1px solid ${T.border}`, borderRadius: 12, padding: 24, position: "sticky", top: 0 }}>
+            {/* Explanation section */}
+            {selected.explanation && (
+              <div style={{ marginBottom: 20 }}>
+                <div style={{ fontSize: 12, color: T.muted, fontWeight: 600, letterSpacing: "0.06em", textTransform: "uppercase", marginBottom: 10 }}>
+                  Why this match?
+                </div>
+                <div style={{
+                  fontSize: 12, color: T.text, lineHeight: 1.7,
+                  background: T.accentLo, border: `1px solid ${T.accent}25`,
+                  borderRadius: 8, padding: "12px 14px",
+                }}>
+                  {selected.explanation}
+                </div>
+              </div>
+            )}
+
             {/* Links section */}
             <div style={{ marginBottom: 20 }}>
               <div style={{ fontSize: 12, color: T.muted, fontWeight: 600, letterSpacing: "0.06em", textTransform: "uppercase", marginBottom: 10 }}>
-                Source Links
+                Links
               </div>
               <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
                 {selected.fundUrl && (
@@ -817,10 +955,10 @@ function MatchesTab({ matches, deliveryEmail, showToast }) {
                     onMouseOver={e => { e.currentTarget.style.background = T.green + "25"; }}
                     onMouseOut={e =>  { e.currentTarget.style.background = T.greenLo; }}
                   >
-                    <span style={{ fontSize: 16 }}>💰</span>
+                    <span style={{ fontSize: 16 }}>🔍</span>
                     <div>
-                      <div style={{ fontWeight: 600 }}>{selected.fund}</div>
-                      <div style={{ fontSize: 10, opacity: 0.7, fontFamily: "DM Mono", marginTop: 1 }}>{selected.fundUrl}</div>
+                      <div style={{ fontWeight: 600 }}>Search: {selected.fund}</div>
+                      <div style={{ fontSize: 10, opacity: 0.7, fontFamily: "DM Mono", marginTop: 1 }}>Google grant search</div>
                     </div>
                     <span style={{ marginLeft: "auto", fontSize: 11 }}>↗</span>
                   </a>
@@ -837,8 +975,8 @@ function MatchesTab({ matches, deliveryEmail, showToast }) {
                   >
                     <span style={{ fontSize: 16 }}>📰</span>
                     <div>
-                      <div style={{ fontWeight: 600 }}>{selected.news}</div>
-                      <div style={{ fontSize: 10, opacity: 0.7, fontFamily: "DM Mono", marginTop: 1 }}>{selected.newsUrl}</div>
+                      <div style={{ fontWeight: 600 }}>Find articles: {selected.news?.split("(")[0]?.trim()}</div>
+                      <div style={{ fontSize: 10, opacity: 0.7, fontFamily: "DM Mono", marginTop: 1 }}>Google news search</div>
                     </div>
                     <span style={{ marginLeft: "auto", fontSize: 11 }}>↗</span>
                   </a>

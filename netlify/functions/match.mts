@@ -92,17 +92,33 @@ News / political sources (name → URL):
 ${newsList}${extraList}
 
 Find the 3–5 best matches between a funding source and a relevant news/political topic.
-For each match return one JSON object. Use the exact URLs provided above for fundUrl and newsUrl.
-For orgUrl, provide the best known website for the suggested recipient organisation.
+For each match return one JSON object with the following rules:
+
+- fundUrl:  a Google search URL that will find the specific grant program / application page.
+  Format: https://www.google.com/search?q=FUND+NAME+tilskudd+søknad
+  Example: https://www.google.com/search?q=DAM+forebyggende+helse+tilskudd+søknad
+
+- newsUrl:  a Google search URL that will find real news articles about this specific topic on that news site.
+  Format: https://www.google.com/search?q=TOPIC+KEYWORDS+site:NEWSDOMAIN
+  Example: https://www.google.com/search?q=psykisk+helse+unge+site:nrk.no
+
+- orgUrl:   the organisation's own website (best known URL).
+
+- explanation: 3–4 sentences in English explaining the full match reasoning:
+  (1) what the news topic is about and why it is currently relevant,
+  (2) what the suggested organisation does and why it is a strong fit for this topic,
+  (3) what the funder's mission / grant program is and how it connects to both,
+  (4) what makes this a high-scoring match overall.
 
 Reply ONLY with a valid JSON array (no markdown, no code fences):
 [{
   "score": 85,
   "fund": "DAM – Forebyggende helse",
-  "fundUrl": "https://www.dam.no/organisasjoner/",
+  "fundUrl": "https://www.google.com/search?q=DAM+forebyggende+helse+tilskudd+søknad",
   "news": "Psykisk helse blant unge (NRK)",
-  "newsUrl": "https://www.nrk.no",
+  "newsUrl": "https://www.google.com/search?q=psykisk+helse+unge+site:nrk.no",
   "insight": "one sentence in English explaining the alignment",
+  "explanation": "NRK has been reporting extensively on the mental health crisis among Norwegian youth, with studies showing a significant rise in anxiety and depression post-pandemic. Mental Helse Norge is a user-led organisation focused specifically on mental health advocacy and support, making them an ideal applicant for a mental-health-focused grant. DAM's Forebyggende helse programme funds preventive health initiatives, and the alignment between current public debate, the organisation's purpose, and the funder's criteria is very strong. The combination of high media attention and direct thematic overlap gives this match a high probability of success.",
   "org": "Mental Helse Norge",
   "orgUrl": "https://www.mentalhelse.no",
   "contact": "post@mentalhelse.no",
@@ -114,7 +130,7 @@ Reply ONLY with a valid JSON array (no markdown, no code fences):
 
   const response = await callAnthropic(ANTHROPIC_API_KEY, {
     model:      "claude-haiku-4-5-20251001",
-    max_tokens: 2000,
+    max_tokens: 3000,
     messages:   [{ role: "user", content: prompt }],
   });
 
