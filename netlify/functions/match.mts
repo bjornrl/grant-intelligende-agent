@@ -1,4 +1,4 @@
-import type { Context } from "@netlify/functions";
+import type { Context, Config } from "@netlify/functions";
 
 export default async (req: Request, context: Context) => {
   if (req.method !== "POST") {
@@ -32,45 +32,17 @@ export default async (req: Request, context: Context) => {
 
   const { profile, keywords, threshold, fundingSources, newsSources } = body;
 
-  const prompt = `You are a Norwegian grant intelligence agent. Your job is to find strong matches between funding programs and recent news/political topics, then draft project proposals.
+  // Lean prompt — short response keeps it well within timeout
+  const prompt = `You are a Norwegian grant intelligence agent. Find 3 matches between funding programs and news topics.
 
-Organisation profile: "${profile}"
-Keywords of interest: ${keywords.join(", ")}
+Org: "${profile.slice(0, 200)}"
+Keywords: ${keywords.slice(0, 6).join(", ")}
+Funding: ${fundingSources.map(f => f.name).join(", ")}
+News: ${newsSources.map(n => n.name).join(", ")}
+Min score: ${threshold}
 
-Active funding sources:
-${fundingSources.map((f) => `- ${f.name} (${f.tag}): ${f.url}`).join("\n")}
-
-Active news/political sources:
-${newsSources.map((n) => `- ${n.name}: ${n.url}`).join("\n")}
-
-Based on this, generate 3-5 realistic grant match opportunities. For each match:
-1. Pick a realistic funding program from the funding sources list
-2. Reference a plausible recent Norwegian news topic relevant to the org profile
-3. Score the alignment (0-100)
-4. Write a concise alignment insight in English
-5. Identify the most relevant Norwegian organisation to contact
-6. Provide a contact email (use realistic-looking Norwegian org emails)
-7. Set a realistic application deadline (within the next 6 months)
-8. Suggest a funding amount in NOK
-9. Draft a 3-paragraph project proposal in Norwegian
-
-Only include matches with score >= ${threshold}.
-
-Respond ONLY with a valid JSON array, no markdown, no explanation. Format:
-[
-  {
-    "score": number,
-    "fund": "string - funding program name",
-    "news": "string - news topic and source",
-    "insight": "string - alignment explanation in English",
-    "org": "string - Norwegian organisation name",
-    "contact": "string - email address",
-    "deadline": "YYYY-MM-DD",
-    "amount": "NOK X XXX XXX",
-    "draft": "string - full Norwegian draft letter",
-    "status": "new"
-  }
-]`;
+Reply ONLY with a JSON array, no markdown:
+[{"score":85,"fund":"DAM – Forebyggende helse","news":"Psykisk helse blant unge (NRK)","insight":"one sentence in English","org":"Mental Helse Norge","contact":"post@mentalhelse.no","deadline":"2025-09-01","amount":"NOK 800 000","draft":"2-3 sentence Norwegian proposal summary","status":"new"}]`;
 
   const response = await fetch("https://api.anthropic.com/v1/messages", {
     method: "POST",
@@ -80,8 +52,8 @@ Respond ONLY with a valid JSON array, no markdown, no explanation. Format:
       "anthropic-version": "2023-06-01",
     },
     body: JSON.stringify({
-      model: "claude-sonnet-4-20250514",
-      max_tokens: 4000,
+      model: "claude-haiku-4-5-20251001",
+      max_tokens: 1500,
       messages: [{ role: "user", content: prompt }],
     }),
   });
@@ -114,6 +86,7 @@ Respond ONLY with a valid JSON array, no markdown, no explanation. Format:
   });
 };
 
-export const config = {
+export const config: Config = {
   path: "/api/match",
+  timeout: 30,
 };
