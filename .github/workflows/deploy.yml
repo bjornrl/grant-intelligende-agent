@@ -36,22 +36,31 @@ jobs:
       - name: Build
         run: npm run build
         env:
-          # Expose Supabase env vars to Vite at build time (optional)
           VITE_SUPABASE_URL:      ${{ secrets.VITE_SUPABASE_URL }}
           VITE_SUPABASE_ANON_KEY: ${{ secrets.VITE_SUPABASE_ANON_KEY }}
 
-      # ── Deploy to Netlify (production on main, preview on PR) ─────────────
+      # ── Install Netlify CLI ───────────────────────────────────────────────
+      - name: Install Netlify CLI
+        run: npm install -g netlify-cli
+
+      # ── Deploy to Netlify ─────────────────────────────────────────────────
+      # Uses netlify-cli so that TypeScript functions are compiled with
+      # esbuild (per netlify.toml) and deployed alongside the static build.
+      # Production deploy on main; preview deploy on pull requests.
       - name: Deploy to Netlify
-        uses: nwtgck/actions-netlify@v3.0
-        with:
-          publish-dir:       "./dist"
-          production-branch: "main"
-          github-token:      ${{ secrets.GITHUB_TOKEN }}
-          deploy-message:    "Deploy from GitHub Actions — ${{ github.sha }}"
-          enable-commit-comment: true
-          enable-pull-request-comment: true
-          overwrites-pull-request-comment: true
+        run: |
+          if [ "${{ github.ref }}" = "refs/heads/main" ]; then
+            netlify deploy \
+              --dir dist \
+              --functions netlify/functions \
+              --prod \
+              --message "Deploy from GitHub Actions — ${{ github.sha }}"
+          else
+            netlify deploy \
+              --dir dist \
+              --functions netlify/functions \
+              --message "Preview — ${{ github.sha }}"
+          fi
         env:
           NETLIFY_AUTH_TOKEN: ${{ secrets.NETLIFY_AUTH_TOKEN }}
           NETLIFY_SITE_ID:    ${{ secrets.NETLIFY_SITE_ID }}
-        timeout-minutes: 5
