@@ -1,6 +1,15 @@
-import { useState, useEffect, useCallback } from "react";
+import { useState, useEffect, useCallback, useRef } from "react";
+import {
+  isEnabled as supabaseEnabled,
+  loadSources,
+  upsertSource,
+  removeSource,
+  toggleSource,
+  saveMatches,
+  loadMatches,
+} from "./supabase.js";
 
-// ── Design Tokens ──────────────────────────────────────────────────────────
+// ── Design Tokens ───────────────────────────────────────────────────────────
 const T = {
   bg:       "#0b0f1a",
   surface:  "#131825",
@@ -40,7 +49,21 @@ const GLOBAL_CSS = css`
   .fade-up-5 { animation-delay: 0.25s; }
 `;
 
-// ── Initial data ───────────────────────────────────────────────────────────
+// ── Category metadata ────────────────────────────────────────────────────────
+const CATEGORY_META = {
+  funding:       { label: "💰 Funding Sources",   color: T.green  },
+  news:          { label: "📰 News Sources",       color: T.amber  },
+  political:     { label: "🏛 Political Sources",  color: T.purple },
+  organizations: { label: "🏢 Organizations",      color: T.accent },
+};
+
+const getCatMeta = (key) =>
+  CATEGORY_META[key] || {
+    label: `🌐 ${key.charAt(0).toUpperCase() + key.slice(1)}`,
+    color: T.muted,
+  };
+
+// ── Initial data ─────────────────────────────────────────────────────────────
 const INITIAL_SOURCES = {
   funding: [
     { id: "dam",       name: "DAM Stiftelsen",      url: "https://www.dam.no/organisasjoner/", active: true,  tag: "Health",   color: T.green  },
@@ -60,6 +83,7 @@ const INITIAL_SOURCES = {
     { id: "stortinget", name: "Stortinget.no",  url: "https://www.stortinget.no",  active: true, tag: "Politics" },
     { id: "regjering",  name: "Regjeringen.no", url: "https://www.regjeringen.no", active: true, tag: "Politics" },
   ],
+  organizations: [],
 };
 
 const PIPELINE_STEPS = [
@@ -70,7 +94,7 @@ const PIPELINE_STEPS = [
   { id: 5, icon: "📤", label: "Deliver",  desc: "Send to Gmail for review + log to Google Drive/Excel", color: T.accent },
 ];
 
-// ── Shared UI helpers ──────────────────────────────────────────────────────
+// ── Shared UI helpers ────────────────────────────────────────────────────────
 const Badge = ({ children, color = T.accent }) => (
   <span style={{
     display: "inline-flex", alignItems: "center", gap: 4,
@@ -128,7 +152,35 @@ const StatusBadge = ({ status }) => {
   return <Badge color={s.color}>{s.label}</Badge>;
 };
 
-// Toast notification
+/** Clickable link chip — opens in new tab */
+const LinkChip = ({ href, label, color = T.accent, icon = "↗" }) => {
+  if (!href) return null;
+  return (
+    <a
+      href={href}
+      target="_blank"
+      rel="noopener noreferrer"
+      style={{
+        display: "inline-flex", alignItems: "center", gap: 4,
+        padding: "3px 10px", borderRadius: 99, fontSize: 11, fontWeight: 500,
+        background: color + "15", color, border: `1px solid ${color}30`,
+        textDecoration: "none", transition: "all 0.15s", cursor: "pointer",
+      }}
+      onMouseOver={e => {
+        e.currentTarget.style.background   = color + "30";
+        e.currentTarget.style.borderColor  = color + "60";
+      }}
+      onMouseOut={e => {
+        e.currentTarget.style.background   = color + "15";
+        e.currentTarget.style.borderColor  = color + "30";
+      }}
+    >
+      {label}
+      <span style={{ fontSize: 9, opacity: 0.6 }}>{icon}</span>
+    </a>
+  );
+};
+
 const Toast = ({ msg, type }) => {
   if (!msg) return null;
   const color = type === "error" ? T.red : type === "warn" ? T.amber : T.green;
@@ -147,21 +199,34 @@ const Toast = ({ msg, type }) => {
   );
 };
 
-// ── Tab: Overview ──────────────────────────────────────────────────────────
+// Shared input style
+const inputStyle = (focused) => ({
+  width: "100%", background: T.surface,
+  border: `1px solid ${focused ? T.accent : T.border}`,
+  borderRadius: 8, color: T.text, fontSize: 13, padding: "10px 12px",
+  fontFamily: "DM Sans", outline: "none", transition: "border-color 0.15s",
+});
+
+// ── Tab: Overview ─────────────────────────────────────────────────────────
 function OverviewTab({ sources, matches }) {
-  const activeFunding = sources.funding.filter(s => s.active).length;
-  const activeNews    = sources.news.filter(s => s.active).length;
-  const activePol     = sources.political.filter(s => s.active).length;
+  const allSources    = Object.values(sources).flat();
+  const activeSources = allSources.filter(s => s.active).length;
+  const byCategory    = Object.entries(sources);
 
   const stats = [
-    { label: "Funding Sources",   value: activeFunding, total: sources.funding.length,  color: T.green  },
-    { label: "News Sources",      value: activeNews,    total: sources.news.length,      color: T.amber  },
-    { label: "Political Sources", value: activePol,     total: sources.political.length, color: T.purple },
-    { label: "Matches Found",     value: matches.length, total: null,                    color: T.accent },
+    { label: "Active Sources", value: activeSources, total: allSources.length, color: T.accent },
+    ...byCategory.slice(0, 2).map(([cat, items]) => ({
+      label: getCatMeta(cat).label.replace(/^\S+\s/, ""),
+      value: items.filter(s => s.active).length,
+      total: items.length,
+      color: getCatMeta(cat).color,
+    })),
+    { label: "Matches Found", value: matches.length, total: null, color: T.green },
   ];
 
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 32 }}>
+      {/* Stats */}
       <div style={{ display: "grid", gridTemplateColumns: "repeat(4,1fr)", gap: 16 }}>
         {stats.map((s, i) => (
           <div key={s.label} className={`fade-up fade-up-${i+1}`} style={{
@@ -180,6 +245,7 @@ function OverviewTab({ sources, matches }) {
         ))}
       </div>
 
+      {/* Pipeline */}
       <div className="fade-up fade-up-2" style={{ background: T.card, border: `1px solid ${T.border}`, borderRadius: 12, padding: 28 }}>
         <h3 style={{ fontSize: 14, fontWeight: 600, color: T.muted, letterSpacing: "0.06em", textTransform: "uppercase", marginBottom: 24 }}>
           Agent Pipeline
@@ -212,6 +278,7 @@ function OverviewTab({ sources, matches }) {
         </div>
       </div>
 
+      {/* Latest matches preview */}
       {matches.length > 0 && (
         <div className="fade-up fade-up-3" style={{ background: T.card, border: `1px solid ${T.border}`, borderRadius: 12, padding: 28 }}>
           <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 20 }}>
@@ -226,8 +293,12 @@ function OverviewTab({ sources, matches }) {
               }}>
                 <ScoreRing score={m.score} />
                 <div style={{ flex: 1, minWidth: 0 }}>
-                  <div style={{ fontSize: 13, fontWeight: 600, color: T.text, marginBottom: 2 }}>{m.fund}</div>
-                  <div style={{ fontSize: 12, color: T.muted, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>↔ {m.news}</div>
+                  <div style={{ fontSize: 13, fontWeight: 600, color: T.text, marginBottom: 4 }}>{m.fund}</div>
+                  <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
+                    <LinkChip href={m.fundUrl} label="Funder" color={T.green} />
+                    <LinkChip href={m.newsUrl} label={m.news?.split("(")[0]?.trim() || "News"} color={T.amber} />
+                    <LinkChip href={m.orgUrl}  label={m.org  || "Org"}  color={T.accent} />
+                  </div>
                 </div>
                 <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
                   <span style={{ fontSize: 12, color: T.muted, fontFamily: "DM Mono" }}>{m.amount}</span>
@@ -238,51 +309,263 @@ function OverviewTab({ sources, matches }) {
           </div>
         </div>
       )}
+
+      {/* Supabase status */}
+      {supabaseEnabled && (
+        <div className="fade-up fade-up-4" style={{
+          display: "flex", alignItems: "center", gap: 10, padding: "10px 16px",
+          background: T.greenLo, border: `1px solid ${T.green}30`, borderRadius: 10, fontSize: 12,
+        }}>
+          <span style={{ color: T.green }}>●</span>
+          <span style={{ color: T.green, fontWeight: 600 }}>Supabase connected</span>
+          <span style={{ color: T.muted }}>— sources and matches are synced to your database</span>
+        </div>
+      )}
     </div>
   );
 }
 
-// ── Tab: Sources ───────────────────────────────────────────────────────────
-function SourcesTab({ sources, setSources }) {
-  const toggle = (category, id) =>
+// ── Tab: Sources ──────────────────────────────────────────────────────────
+function SourcesTab({ sources, setSources, showToast }) {
+  const [showForm,     setShowForm]     = useState(false);
+  const [focusedField, setFocusedField] = useState(null);
+  const [newCat,       setNewCat]       = useState("");
+  const [form,         setForm]         = useState({
+    category: "funding", name: "", url: "", tag: "",
+  });
+
+  const categories = Object.keys(sources);
+
+  // ── Toggle active ────────────────────────────────────────────────────────
+  const handleToggle = (cat, id) => {
+    const updated = sources[cat].map(s => s.id === id ? { ...s, active: !s.active } : s);
+    setSources(prev => ({ ...prev, [cat]: updated }));
+    const source = sources[cat].find(s => s.id === id);
+    if (supabaseEnabled && source) toggleSource(id, !source.active);
+  };
+
+  // ── Delete source ────────────────────────────────────────────────────────
+  const handleDelete = (cat, id, name) => {
+    setSources(prev => ({ ...prev, [cat]: prev[cat].filter(s => s.id !== id) }));
+    if (supabaseEnabled) removeSource(id);
+    showToast(`Removed "${name}"`, "success");
+  };
+
+  // ── Add source ───────────────────────────────────────────────────────────
+  const handleAdd = () => {
+    const cat = form.category === "__new__"
+      ? newCat.trim().toLowerCase().replace(/\s+/g, "_")
+      : form.category;
+
+    if (!cat) { showToast("Please enter a category name", "warn"); return; }
+    if (!form.name.trim()) { showToast("Please enter a source name", "warn"); return; }
+    if (!form.url.trim())  { showToast("Please enter a URL", "warn"); return; }
+
+    const meta   = getCatMeta(cat);
+    const source = {
+      id:     `custom_${Date.now()}`,
+      name:   form.name.trim(),
+      url:    form.url.trim().startsWith("http") ? form.url.trim() : `https://${form.url.trim()}`,
+      active: true,
+      tag:    form.tag.trim() || meta.label.replace(/^\S+\s/, ""),
+      color:  meta.color,
+    };
+
     setSources(prev => ({
       ...prev,
-      [category]: prev[category].map(s => s.id === id ? { ...s, active: !s.active } : s),
+      [cat]: [...(prev[cat] || []), source],
     }));
 
-  const sections = [
-    { key: "funding",   label: "💰 Funding Sources",  accent: T.green  },
-    { key: "news",      label: "📰 News Sources",      accent: T.amber  },
-    { key: "political", label: "🏛 Political Sources", accent: T.purple },
-  ];
+    if (supabaseEnabled) upsertSource(cat, source);
+
+    setForm({ category: "funding", name: "", url: "", tag: "" });
+    setNewCat("");
+    setShowForm(false);
+    showToast(`Added "${source.name}" to ${cat}`, "success");
+  };
 
   return (
-    <div style={{ display: "flex", flexDirection: "column", gap: 24 }}>
-      {sections.map((sec, si) => (
-        <div key={sec.key} className={`fade-up fade-up-${si+1}`} style={{
-          background: T.card, border: `1px solid ${T.border}`, borderRadius: 12, overflow: "hidden",
-        }}>
-          <div style={{ padding: "14px 24px", borderBottom: `1px solid ${T.border}`, display: "flex", justifyContent: "space-between", alignItems: "center" }}>
-            <span style={{ fontSize: 13, fontWeight: 600 }}>{sec.label}</span>
-            <span style={{ fontSize: 12, color: T.muted }}>{sources[sec.key].filter(s => s.active).length}/{sources[sec.key].length} active</span>
-          </div>
-          <div style={{ padding: 8 }}>
-            {sources[sec.key].map(source => (
-              <div key={source.id} style={{
-                display: "flex", alignItems: "center", gap: 12, padding: "12px 16px",
-                borderRadius: 8, background: source.active ? sec.accent + "08" : "transparent",
-              }}>
-                <Toggle checked={source.active} onChange={() => toggle(sec.key, source.id)} />
-                <div style={{ flex: 1, minWidth: 0 }}>
-                  <div style={{ fontSize: 13, fontWeight: 500, color: source.active ? T.text : T.muted }}>{source.name}</div>
-                  <div style={{ fontSize: 11, color: T.muted, marginTop: 2, fontFamily: "DM Mono", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{source.url}</div>
+    <div style={{ display: "flex", flexDirection: "column", gap: 20 }}>
+      {/* Category sections */}
+      {Object.entries(sources).map(([cat, items], si) => {
+        const meta = getCatMeta(cat);
+        return (
+          <div key={cat} className={`fade-up fade-up-${Math.min(si + 1, 5)}`} style={{
+            background: T.card, border: `1px solid ${T.border}`, borderRadius: 12, overflow: "hidden",
+          }}>
+            {/* Section header */}
+            <div style={{
+              padding: "14px 24px", borderBottom: `1px solid ${T.border}`,
+              display: "flex", justifyContent: "space-between", alignItems: "center",
+            }}>
+              <span style={{ fontSize: 13, fontWeight: 600 }}>{meta.label}</span>
+              <Badge color={meta.color}>{items.filter(s => s.active).length}/{items.length} active</Badge>
+            </div>
+
+            {/* Source rows */}
+            <div style={{ padding: 8 }}>
+              {items.length === 0 && (
+                <div style={{ padding: "16px 20px", fontSize: 12, color: T.muted, fontStyle: "italic" }}>
+                  No sources yet — add one below.
                 </div>
-                {source.tag && <Badge color={source.color || sec.accent}>{source.tag}</Badge>}
+              )}
+              {items.map(source => (
+                <div key={source.id} style={{
+                  display: "flex", alignItems: "center", gap: 12, padding: "12px 16px",
+                  borderRadius: 8, background: source.active ? meta.color + "08" : "transparent",
+                  transition: "background 0.15s",
+                }}>
+                  <Toggle checked={source.active} onChange={() => handleToggle(cat, source.id)} />
+                  <div style={{ flex: 1, minWidth: 0 }}>
+                    <div style={{ fontSize: 13, fontWeight: 500, color: source.active ? T.text : T.muted, marginBottom: 2 }}>
+                      {source.name}
+                    </div>
+                    <a
+                      href={source.url} target="_blank" rel="noopener noreferrer"
+                      style={{ fontSize: 11, color: T.muted, fontFamily: "DM Mono", display: "block",
+                               overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap",
+                               textDecoration: "none" }}
+                      onMouseOver={e => { e.currentTarget.style.color = T.accent; }}
+                      onMouseOut={e =>  { e.currentTarget.style.color = T.muted;  }}
+                    >{source.url} ↗</a>
+                  </div>
+                  {source.tag && <Badge color={source.color || meta.color}>{source.tag}</Badge>}
+                  <button
+                    type="button"
+                    onClick={() => handleDelete(cat, source.id, source.name)}
+                    title="Remove source"
+                    style={{
+                      background: "none", border: "none", cursor: "pointer", color: T.muted,
+                      fontSize: 16, padding: "2px 6px", borderRadius: 4, lineHeight: 1,
+                      transition: "color 0.15s",
+                    }}
+                    onMouseOver={e => { e.currentTarget.style.color = T.red; }}
+                    onMouseOut={e =>  { e.currentTarget.style.color = T.muted; }}
+                  >×</button>
+                </div>
+              ))}
+            </div>
+          </div>
+        );
+      })}
+
+      {/* Add source form / button */}
+      {showForm ? (
+        <div className="fade-up" style={{
+          background: T.card, border: `1px solid ${T.accent}40`, borderRadius: 12, padding: 24,
+        }}>
+          <h3 style={{ fontSize: 14, fontWeight: 600, marginBottom: 20 }}>Add New Source</h3>
+
+          {/* Category row */}
+          <div style={{ display: "grid", gridTemplateColumns: form.category === "__new__" ? "1fr 1fr" : "1fr", gap: 12, marginBottom: 12 }}>
+            <div>
+              <label style={{ fontSize: 11, color: T.muted, fontWeight: 600, display: "block", marginBottom: 6, letterSpacing: "0.04em" }}>
+                CATEGORY
+              </label>
+              <select
+                value={form.category}
+                onChange={e => setForm(p => ({ ...p, category: e.target.value }))}
+                style={{ ...inputStyle(false), appearance: "none" }}
+              >
+                {categories.map(cat => (
+                  <option key={cat} value={cat}>{getCatMeta(cat).label}</option>
+                ))}
+                <option value="__new__">+ New category…</option>
+              </select>
+            </div>
+            {form.category === "__new__" && (
+              <div>
+                <label style={{ fontSize: 11, color: T.muted, fontWeight: 600, display: "block", marginBottom: 6, letterSpacing: "0.04em" }}>
+                  CATEGORY NAME
+                </label>
+                <input
+                  value={newCat}
+                  onChange={e => setNewCat(e.target.value)}
+                  placeholder="e.g. organizations"
+                  style={inputStyle(focusedField === "newCat")}
+                  onFocus={() => setFocusedField("newCat")}
+                  onBlur={() =>  setFocusedField(null)}
+                />
               </div>
-            ))}
+            )}
+          </div>
+
+          {/* Name + Tag row */}
+          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12, marginBottom: 12 }}>
+            <div>
+              <label style={{ fontSize: 11, color: T.muted, fontWeight: 600, display: "block", marginBottom: 6, letterSpacing: "0.04em" }}>
+                NAME <span style={{ color: T.red }}>*</span>
+              </label>
+              <input
+                value={form.name}
+                onChange={e => setForm(p => ({ ...p, name: e.target.value }))}
+                placeholder="e.g. Mental Helse Norge"
+                style={inputStyle(focusedField === "name")}
+                onFocus={() => setFocusedField("name")}
+                onBlur={() =>  setFocusedField(null)}
+              />
+            </div>
+            <div>
+              <label style={{ fontSize: 11, color: T.muted, fontWeight: 600, display: "block", marginBottom: 6, letterSpacing: "0.04em" }}>
+                TAG (optional)
+              </label>
+              <input
+                value={form.tag}
+                onChange={e => setForm(p => ({ ...p, tag: e.target.value }))}
+                placeholder="e.g. NGO, Health"
+                style={inputStyle(focusedField === "tag")}
+                onFocus={() => setFocusedField("tag")}
+                onBlur={() =>  setFocusedField(null)}
+              />
+            </div>
+          </div>
+
+          {/* URL */}
+          <div style={{ marginBottom: 20 }}>
+            <label style={{ fontSize: 11, color: T.muted, fontWeight: 600, display: "block", marginBottom: 6, letterSpacing: "0.04em" }}>
+              URL <span style={{ color: T.red }}>*</span>
+            </label>
+            <input
+              value={form.url}
+              onChange={e => setForm(p => ({ ...p, url: e.target.value }))}
+              placeholder="https://www.example.no"
+              onKeyDown={e => e.key === "Enter" && handleAdd()}
+              style={inputStyle(focusedField === "url")}
+              onFocus={() => setFocusedField("url")}
+              onBlur={() =>  setFocusedField(null)}
+            />
+          </div>
+
+          <div style={{ display: "flex", gap: 10, justifyContent: "flex-end" }}>
+            <button
+              type="button"
+              onClick={() => { setShowForm(false); setForm({ category: "funding", name: "", url: "", tag: "" }); setNewCat(""); }}
+              style={{ padding: "10px 20px", borderRadius: 8, border: `1px solid ${T.border}`, background: "transparent", color: T.muted, fontSize: 13, cursor: "pointer" }}
+            >Cancel</button>
+            <button
+              type="button"
+              onClick={handleAdd}
+              style={{ padding: "10px 20px", borderRadius: 8, border: "none", background: T.accent, color: "#fff", fontSize: 13, fontWeight: 600, cursor: "pointer" }}
+            >Add Source</button>
           </div>
         </div>
-      ))}
+      ) : (
+        <button
+          type="button"
+          onClick={() => setShowForm(true)}
+          style={{
+            padding: "16px", borderRadius: 12, border: `1.5px dashed ${T.borderHi}`,
+            background: "transparent", color: T.muted, fontSize: 13, cursor: "pointer",
+            display: "flex", alignItems: "center", justifyContent: "center", gap: 8,
+            transition: "all 0.15s",
+          }}
+          onMouseOver={e => { e.currentTarget.style.borderColor = T.accent; e.currentTarget.style.color = T.accent; }}
+          onMouseOut={e =>  { e.currentTarget.style.borderColor = T.borderHi; e.currentTarget.style.color = T.muted; }}
+        >
+          <span style={{ fontSize: 18 }}>+</span>
+          Add Source &mdash; website, organisation, funder, news outlet…
+        </button>
+      )}
     </div>
   );
 }
@@ -363,23 +646,22 @@ function MatchingTab({ profile, setProfile, keywords, setKeywords, threshold, se
 Keywords: ${keywords.join(", ")}
 Threshold: >= ${threshold}
 
-→ Claude will generate ${threshold >= 85 ? "3–4 strict" : threshold >= 70 ? "4–5 focused" : "5+ broad"} matches with Norwegian draft letters.`}</pre>
+→ Claude will generate ${threshold >= 85 ? "3–4 strict" : threshold >= 70 ? "4–5 focused" : "5+ broad"} matches
+  Each match includes clickable links: funder page, news source, organisation website.`}</pre>
       </div>
     </div>
   );
 }
 
-// ── Tab: Matches ───────────────────────────────────────────────────────────
+// ── Tab: Matches ──────────────────────────────────────────────────────────
 function MatchesTab({ matches, deliveryEmail, showToast }) {
   const [selected, setSelected] = useState(null);
-  const [draft, setDraft]       = useState(null);
-  const [sending, setSending]   = useState(false);
-  const [logging, setLogging]   = useState(false);
+  const [draft,    setDraft]    = useState(null);
+  const [sending,  setSending]  = useState(false);
+  const [logging,  setLogging]  = useState(false);
 
   useEffect(() => {
-    if (selected) {
-      setDraft(selected.draft || null);
-    }
+    if (selected) setDraft(selected.draft || null);
   }, [selected]);
 
   const handleSendEmail = async () => {
@@ -387,9 +669,20 @@ function MatchesTab({ matches, deliveryEmail, showToast }) {
     if (!deliveryEmail) { showToast("Set an email address in the Delivery tab first.", "warn"); return; }
     setSending(true);
     try {
+      const linkRow = [
+        selected.fundUrl ? `<a href="${selected.fundUrl}">🔗 Funder page</a>` : "",
+        selected.newsUrl ? `<a href="${selected.newsUrl}">🔗 News source</a>` : "",
+        selected.orgUrl  ? `<a href="${selected.orgUrl}">🔗 Organisation</a>` : "",
+      ].filter(Boolean).join(" &nbsp;|&nbsp; ");
+
       const html = `
         <h2 style="font-family:sans-serif">Grant Match: ${selected.fund}</h2>
-        <p style="font-family:sans-serif;color:#666">Score: <strong>${selected.score}/100</strong> &nbsp;|&nbsp; Amount: <strong>${selected.amount}</strong> &nbsp;|&nbsp; Deadline: <strong>${selected.deadline}</strong></p>
+        <p style="font-family:sans-serif;color:#666">
+          Score: <strong>${selected.score}/100</strong> &nbsp;|&nbsp;
+          Amount: <strong>${selected.amount}</strong> &nbsp;|&nbsp;
+          Deadline: <strong>${selected.deadline}</strong>
+        </p>
+        ${linkRow ? `<p style="font-family:sans-serif">${linkRow}</p>` : ""}
         <hr/>
         <p style="font-family:sans-serif"><strong>News alignment:</strong> ${selected.news}</p>
         <p style="font-family:sans-serif"><strong>Insight:</strong> ${selected.insight}</p>
@@ -414,7 +707,7 @@ function MatchesTab({ matches, deliveryEmail, showToast }) {
       if (!res.ok) throw new Error(data.error || "Send failed");
       showToast("Email sent to " + deliveryEmail, "success");
     } catch (e) {
-      showToast(e.message.includes("not configured") ? "Gmail not set up yet — see Delivery tab for instructions." : e.message, "error");
+      showToast(e.message.includes("not configured") ? "Gmail not set up yet — see Delivery tab." : e.message, "error");
     } finally {
       setSending(false);
     }
@@ -433,7 +726,7 @@ function MatchesTab({ matches, deliveryEmail, showToast }) {
       if (!res.ok) throw new Error(data.error || "Log failed");
       showToast("Match logged to Google Sheets!", "success");
     } catch (e) {
-      showToast(e.message.includes("not configured") ? "Google Drive not set up yet — see Delivery tab for instructions." : e.message, "error");
+      showToast(e.message.includes("not configured") ? "Google Drive not set up yet — see Delivery tab." : e.message, "error");
     } finally {
       setLogging(false);
     }
@@ -444,16 +737,19 @@ function MatchesTab({ matches, deliveryEmail, showToast }) {
       <div style={{ textAlign: "center", padding: "64px 24px", color: T.muted }}>
         <div style={{ fontSize: 48, marginBottom: 16 }}>🤖</div>
         <div style={{ fontSize: 16, fontWeight: 600, marginBottom: 8, color: T.text }}>No matches yet</div>
-        <div style={{ fontSize: 13 }}>Click <strong style={{ color: T.accent }}>▶ Run Agent</strong> in the top bar to generate real AI matches using Claude.</div>
+        <div style={{ fontSize: 13 }}>Click <strong style={{ color: T.accent }}>▶ Run Agent</strong> to generate AI matches.</div>
       </div>
     );
   }
 
   return (
     <div style={{ display: "flex", gap: 20 }}>
+      {/* Match list */}
       <div style={{ flex: 1, display: "flex", flexDirection: "column", gap: 12 }}>
         {matches.map((m, i) => (
-          <div key={i} className={`fade-up fade-up-${Math.min(i+1,5)}`}
+          <div
+            key={i}
+            className={`fade-up fade-up-${Math.min(i + 1, 5)}`}
             onClick={() => setSelected(m)}
             onKeyDown={e => e.key === "Enter" && setSelected(m)}
             role="button" tabIndex={0}
@@ -461,17 +757,36 @@ function MatchesTab({ matches, deliveryEmail, showToast }) {
               background: selected === m ? T.accentLo : T.card,
               border: `1px solid ${selected === m ? T.accent + "60" : T.border}`,
               borderRadius: 12, padding: 20, cursor: "pointer", transition: "all 0.15s",
-            }}>
+            }}
+          >
             <div style={{ display: "flex", alignItems: "flex-start", gap: 14 }}>
               <ScoreRing score={m.score} />
               <div style={{ flex: 1, minWidth: 0 }}>
+                {/* Title row */}
                 <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", gap: 8, marginBottom: 6 }}>
                   <div style={{ fontSize: 14, fontWeight: 600 }}>{m.fund}</div>
                   <StatusBadge status={m.status} />
                 </div>
-                <div style={{ fontSize: 12, color: T.muted, marginBottom: 8 }}>↔ <span style={{ color: T.amber }}>{m.news}</span></div>
-                <div style={{ fontSize: 12, color: T.text + "bb", lineHeight: 1.5 }}>{m.insight}</div>
-                <div style={{ display: "flex", gap: 16, marginTop: 12, flexWrap: "wrap" }}>
+
+                {/* News line */}
+                <div style={{ fontSize: 12, color: T.muted, marginBottom: 8 }}>
+                  ↔ <span style={{ color: T.amber }}>{m.news}</span>
+                </div>
+
+                {/* Insight */}
+                <div style={{ fontSize: 12, color: T.text + "bb", lineHeight: 1.5, marginBottom: 12 }}>
+                  {m.insight}
+                </div>
+
+                {/* Link chips */}
+                <div style={{ display: "flex", gap: 6, flexWrap: "wrap", marginBottom: 12 }}>
+                  <LinkChip href={m.fundUrl} label="💰 Funder page"  color={T.green}  />
+                  <LinkChip href={m.newsUrl} label="📰 News source"  color={T.amber}  />
+                  <LinkChip href={m.orgUrl}  label="🏢 Organisation" color={T.accent} />
+                </div>
+
+                {/* Meta row */}
+                <div style={{ display: "flex", gap: 16, flexWrap: "wrap" }}>
                   <span style={{ fontSize: 11, color: T.green, fontFamily: "DM Mono", fontWeight: 600 }}>{m.amount}</span>
                   <span style={{ fontSize: 11, color: T.muted }}>Deadline: <span style={{ color: T.text }}>{m.deadline}</span></span>
                   <span style={{ fontSize: 11, color: T.muted }}>{m.contact}</span>
@@ -482,42 +797,118 @@ function MatchesTab({ matches, deliveryEmail, showToast }) {
         ))}
       </div>
 
+      {/* Detail panel */}
       <div style={{ width: 360, flexShrink: 0 }}>
         {selected ? (
           <div style={{ background: T.card, border: `1px solid ${T.border}`, borderRadius: 12, padding: 24, position: "sticky", top: 0 }}>
-            <div style={{ fontSize: 13, fontWeight: 600, marginBottom: 16, color: T.muted, letterSpacing: "0.06em", textTransform: "uppercase" }}>Actions</div>
-            <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+            {/* Links section */}
+            <div style={{ marginBottom: 20 }}>
+              <div style={{ fontSize: 12, color: T.muted, fontWeight: 600, letterSpacing: "0.06em", textTransform: "uppercase", marginBottom: 10 }}>
+                Source Links
+              </div>
+              <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+                {selected.fundUrl && (
+                  <a href={selected.fundUrl} target="_blank" rel="noopener noreferrer" style={{
+                    display: "flex", alignItems: "center", gap: 10, padding: "10px 14px",
+                    background: T.greenLo, border: `1px solid ${T.green}30`, borderRadius: 8,
+                    textDecoration: "none", color: T.green, fontSize: 12, fontWeight: 500,
+                    transition: "all 0.15s",
+                  }}
+                    onMouseOver={e => { e.currentTarget.style.background = T.green + "25"; }}
+                    onMouseOut={e =>  { e.currentTarget.style.background = T.greenLo; }}
+                  >
+                    <span style={{ fontSize: 16 }}>💰</span>
+                    <div>
+                      <div style={{ fontWeight: 600 }}>{selected.fund}</div>
+                      <div style={{ fontSize: 10, opacity: 0.7, fontFamily: "DM Mono", marginTop: 1 }}>{selected.fundUrl}</div>
+                    </div>
+                    <span style={{ marginLeft: "auto", fontSize: 11 }}>↗</span>
+                  </a>
+                )}
+                {selected.newsUrl && (
+                  <a href={selected.newsUrl} target="_blank" rel="noopener noreferrer" style={{
+                    display: "flex", alignItems: "center", gap: 10, padding: "10px 14px",
+                    background: T.amberLo, border: `1px solid ${T.amber}30`, borderRadius: 8,
+                    textDecoration: "none", color: T.amber, fontSize: 12, fontWeight: 500,
+                    transition: "all 0.15s",
+                  }}
+                    onMouseOver={e => { e.currentTarget.style.background = T.amber + "25"; }}
+                    onMouseOut={e =>  { e.currentTarget.style.background = T.amberLo; }}
+                  >
+                    <span style={{ fontSize: 16 }}>📰</span>
+                    <div>
+                      <div style={{ fontWeight: 600 }}>{selected.news}</div>
+                      <div style={{ fontSize: 10, opacity: 0.7, fontFamily: "DM Mono", marginTop: 1 }}>{selected.newsUrl}</div>
+                    </div>
+                    <span style={{ marginLeft: "auto", fontSize: 11 }}>↗</span>
+                  </a>
+                )}
+                {selected.orgUrl && (
+                  <a href={selected.orgUrl} target="_blank" rel="noopener noreferrer" style={{
+                    display: "flex", alignItems: "center", gap: 10, padding: "10px 14px",
+                    background: T.accentLo, border: `1px solid ${T.accent}30`, borderRadius: 8,
+                    textDecoration: "none", color: T.accent, fontSize: 12, fontWeight: 500,
+                    transition: "all 0.15s",
+                  }}
+                    onMouseOver={e => { e.currentTarget.style.background = T.accent + "25"; }}
+                    onMouseOut={e =>  { e.currentTarget.style.background = T.accentLo; }}
+                  >
+                    <span style={{ fontSize: 16 }}>🏢</span>
+                    <div>
+                      <div style={{ fontWeight: 600 }}>{selected.org}</div>
+                      <div style={{ fontSize: 10, opacity: 0.7, fontFamily: "DM Mono", marginTop: 1 }}>{selected.orgUrl}</div>
+                    </div>
+                    <span style={{ marginLeft: "auto", fontSize: 11 }}>↗</span>
+                  </a>
+                )}
+              </div>
+            </div>
+
+            {/* Actions */}
+            <div style={{ fontSize: 13, fontWeight: 600, marginBottom: 10, color: T.muted, letterSpacing: "0.06em", textTransform: "uppercase" }}>Actions</div>
+            <div style={{ display: "flex", flexDirection: "column", gap: 10, marginBottom: 20 }}>
               <button type="button" onClick={handleSendEmail} disabled={sending} style={{
                 padding: "11px 0", borderRadius: 8, border: `1px solid ${T.green}40`,
-                background: T.greenLo, color: T.green, fontSize: 13, fontWeight: 600, cursor: sending ? "not-allowed" : "pointer",
+                background: T.greenLo, color: T.green, fontSize: 13, fontWeight: 600,
+                cursor: sending ? "not-allowed" : "pointer",
                 display: "flex", alignItems: "center", justifyContent: "center", gap: 8,
               }}>
                 {sending ? <><Spinner color={T.green} /> Sending…</> : "📧 Send to Gmail"}
               </button>
               <button type="button" onClick={handleLogMatch} disabled={logging} style={{
                 padding: "11px 0", borderRadius: 8, border: `1px solid ${T.purple}40`,
-                background: T.purpleLo, color: T.purple, fontSize: 13, fontWeight: 600, cursor: logging ? "not-allowed" : "pointer",
+                background: T.purpleLo, color: T.purple, fontSize: 13, fontWeight: 600,
+                cursor: logging ? "not-allowed" : "pointer",
                 display: "flex", alignItems: "center", justifyContent: "center", gap: 8,
               }}>
                 {logging ? <><Spinner color={T.purple} /> Logging…</> : "📊 Log to Google Drive"}
               </button>
             </div>
 
+            {/* Draft */}
             {(draft || selected.draft) && (
-              <div style={{ marginTop: 20 }}>
+              <div>
                 <div style={{ fontSize: 12, color: T.muted, marginBottom: 8, letterSpacing: "0.06em", textTransform: "uppercase", fontWeight: 600 }}>Draft</div>
-                <textarea value={draft ?? selected.draft ?? ""} onChange={e => setDraft(e.target.value)} rows={14} style={{
-                  width: "100%", background: T.surface, border: `1px solid ${T.border}`,
-                  borderRadius: 8, color: T.text, fontSize: 12, padding: "12px 14px",
-                  fontFamily: "DM Mono", resize: "vertical", outline: "none", lineHeight: 1.6,
-                }} />
+                <textarea
+                  value={draft ?? selected.draft ?? ""}
+                  onChange={e => setDraft(e.target.value)}
+                  rows={10}
+                  style={{
+                    width: "100%", background: T.surface, border: `1px solid ${T.border}`,
+                    borderRadius: 8, color: T.text, fontSize: 12, padding: "12px 14px",
+                    fontFamily: "DM Mono", resize: "vertical", outline: "none", lineHeight: 1.6,
+                  }}
+                />
               </div>
             )}
           </div>
         ) : (
-          <div style={{ background: T.card, border: `1px solid ${T.border}`, borderRadius: 12, padding: 48, textAlign: "center", color: T.muted }}>
+          <div style={{
+            background: T.card, border: `1px solid ${T.border}`, borderRadius: 12,
+            padding: 48, textAlign: "center", color: T.muted,
+          }}>
             <div style={{ fontSize: 32, marginBottom: 12 }}>←</div>
-            <div style={{ fontSize: 13 }}>Select a match to send to Gmail or log to Google Drive</div>
+            <div style={{ fontSize: 13 }}>Select a match to view links, send to Gmail, or log to Google Drive</div>
           </div>
         )}
       </div>
@@ -525,18 +916,18 @@ function MatchesTab({ matches, deliveryEmail, showToast }) {
   );
 }
 
-// ── Tab: Delivery ──────────────────────────────────────────────────────────
+// ── Tab: Delivery ─────────────────────────────────────────────────────────
 function DeliveryTab({ deliveryEmail, setDeliveryEmail }) {
-  const [schedule, setSchedule]     = useState("weekly");
-  const [outputs, setOutputs]       = useState({ gmail: true, gdrive: true, slack: false, excel: true });
-  const [n8nExpanded, setN8nExpanded] = useState(false);
+  const [schedule, setSchedule] = useState("weekly");
+  const [outputs, setOutputs]   = useState({ gmail: true, gdrive: true, slack: false, excel: true });
+  const [n8nExpanded, setN8n]   = useState(false);
   const toggleOutput = k => setOutputs(prev => ({ ...prev, [k]: !prev[k] }));
 
   const n8nWorkflow = JSON.stringify({
     name: "Grant Intelligence Agent",
     nodes: [
       { name: "Schedule Trigger", type: "n8n-nodes-base.scheduleTrigger", parameters: { rule: { interval: [{ field: "weeks", weeksInterval: 1 }] } } },
-      { name: "Call Match API", type: "n8n-nodes-base.httpRequest", parameters: { url: "https://your-site.netlify.app/api/match", method: "POST", authentication: "none" } },
+      { name: "Call Match API", type: "n8n-nodes-base.httpRequest", parameters: { url: "https://your-site.netlify.app/api/match", method: "POST" } },
       { name: "Send Gmail", type: "n8n-nodes-base.httpRequest", parameters: { url: "https://your-site.netlify.app/api/send-email", method: "POST" } },
       { name: "Log to Sheets", type: "n8n-nodes-base.httpRequest", parameters: { url: "https://your-site.netlify.app/api/log-match", method: "POST" } },
     ],
@@ -548,10 +939,10 @@ function DeliveryTab({ deliveryEmail, setDeliveryEmail }) {
       <div className="fade-up fade-up-1" style={{ background: T.card, border: `1px solid ${T.border}`, borderRadius: 12, padding: 28 }}>
         <h3 style={{ fontSize: 14, fontWeight: 600, letterSpacing: "0.06em", textTransform: "uppercase", color: T.muted, marginBottom: 20 }}>Output Channels</h3>
         {[
-          { key: "gmail",  label: "Gmail",        desc: "Send draft proposals to your email for review",          icon: "📧", color: T.accent  },
-          { key: "gdrive", label: "Google Drive", desc: "Log matches to a Google Sheet for tracking",             icon: "📁", color: T.green   },
-          { key: "excel",  label: "Excel Log",    desc: "Append matches to an Excel sheet (via n8n)",             icon: "📊", color: T.amber   },
-          { key: "slack",  label: "Slack",         desc: "Post a weekly summary to a Slack channel (via n8n)",    icon: "💬", color: T.purple  },
+          { key: "gmail",  label: "Gmail",        desc: "Send draft proposals to your email for review",       icon: "📧", color: T.accent  },
+          { key: "gdrive", label: "Google Drive", desc: "Log matches to a Google Sheet for tracking",          icon: "📁", color: T.green   },
+          { key: "excel",  label: "Excel Log",    desc: "Append matches to an Excel sheet (via n8n)",          icon: "📊", color: T.amber   },
+          { key: "slack",  label: "Slack",        desc: "Post a weekly summary to a Slack channel (via n8n)",  icon: "💬", color: T.purple  },
         ].map(o => (
           <div key={o.key} style={{ display: "flex", alignItems: "center", gap: 14, padding: "14px 0", borderBottom: `1px solid ${T.border}` }}>
             <span style={{ fontSize: 22 }}>{o.icon}</span>
@@ -595,14 +986,17 @@ function DeliveryTab({ deliveryEmail, setDeliveryEmail }) {
         <div style={{ fontSize: 13, fontWeight: 600, color: T.amber, marginBottom: 12 }}>⚙ API Setup Required</div>
         <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
           {[
-            { key: "ANTHROPIC_API_KEY", label: "Claude AI", desc: "Get from console.anthropic.com", required: true },
-            { key: "GMAIL_CLIENT_ID + GMAIL_CLIENT_SECRET + GMAIL_REFRESH_TOKEN + GMAIL_FROM_EMAIL", label: "Gmail", desc: "OAuth2 via Google Cloud Console → Gmail API", required: false },
-            { key: "GDRIVE_CLIENT_ID + GDRIVE_CLIENT_SECRET + GDRIVE_REFRESH_TOKEN + GDRIVE_SHEET_ID", label: "Google Sheets", desc: "OAuth2 via Google Cloud Console → Sheets API", required: false },
+            { key: "ANTHROPIC_API_KEY",        label: "Claude AI",     desc: "Get from console.anthropic.com",                     required: true  },
+            { key: "VITE_SUPABASE_URL + VITE_SUPABASE_ANON_KEY", label: "Supabase",    desc: "Optional: persist sources & matches to DB (see supabase/schema.sql)", required: false },
+            { key: "GMAIL_CLIENT_ID + GMAIL_CLIENT_SECRET + …", label: "Gmail",       desc: "OAuth2 via Google Cloud Console → Gmail API",         required: false },
+            { key: "GDRIVE_CLIENT_ID + GDRIVE_CLIENT_SECRET + …", label: "Google Sheets", desc: "OAuth2 via Google Cloud Console → Sheets API",     required: false },
           ].map(item => (
             <div key={item.key} style={{ display: "flex", gap: 12, padding: "10px 12px", background: T.surface, borderRadius: 8 }}>
               <div style={{ width: 6, height: 6, borderRadius: "50%", background: item.required ? T.red : T.amber, marginTop: 5, flexShrink: 0 }} />
               <div style={{ flex: 1 }}>
-                <div style={{ fontSize: 12, fontWeight: 600, marginBottom: 2 }}>{item.label} {item.required && <span style={{ color: T.red, fontSize: 10 }}>REQUIRED</span>}</div>
+                <div style={{ fontSize: 12, fontWeight: 600, marginBottom: 2 }}>
+                  {item.label} {item.required && <span style={{ color: T.red, fontSize: 10 }}>REQUIRED</span>}
+                </div>
                 <code style={{ fontSize: 10, color: T.accent, fontFamily: "DM Mono" }}>{item.key}</code>
                 <div style={{ fontSize: 11, color: T.muted, marginTop: 2 }}>{item.desc}</div>
               </div>
@@ -610,13 +1004,13 @@ function DeliveryTab({ deliveryEmail, setDeliveryEmail }) {
           ))}
         </div>
         <div style={{ fontSize: 12, color: T.muted, marginTop: 12 }}>
-          Add these in Netlify → Site configuration → Environment variables
+          Add to Netlify → Site configuration → Environment variables. VITE_ vars also need to be set in your .env file locally.
         </div>
       </div>
 
-      {/* n8n JSON */}
+      {/* n8n workflow */}
       <div className="fade-up fade-up-4" style={{ background: T.card, border: `1px solid ${T.border}`, borderRadius: 12, overflow: "hidden" }}>
-        <button type="button" onClick={() => setN8nExpanded(!n8nExpanded)} style={{
+        <button type="button" onClick={() => setN8n(!n8nExpanded)} style={{
           width: "100%", display: "flex", justifyContent: "space-between", alignItems: "center",
           padding: "18px 24px", background: "none", border: "none", cursor: "pointer", color: T.text,
         }}>
@@ -645,7 +1039,7 @@ function DeliveryTab({ deliveryEmail, setDeliveryEmail }) {
   );
 }
 
-// ── App ────────────────────────────────────────────────────────────────────
+// ── App ───────────────────────────────────────────────────────────────────
 export default function App() {
   const [tab,           setTab]          = useState("overview");
   const [sources,       setSources]      = useState(INITIAL_SOURCES);
@@ -653,8 +1047,8 @@ export default function App() {
   const [running,       setRunning]      = useState(false);
   const [toast,         setToast]        = useState({ msg: "", type: "success" });
   const [deliveryEmail, setDeliveryEmail] = useState("");
+  const [dbLoading,     setDbLoading]    = useState(supabaseEnabled);
 
-  // AI config (lifted so MatchingTab can share with run)
   const [profile,   setProfile]   = useState("Vi arbeider med forebygging og mestring av sykdom i Norge, med fokus på mental helse, rehabilitering og pasientstøtte.");
   const [keywords,  setKeywords]  = useState(["helse", "rehabilitering", "forebygging", "pasient", "mental helse"]);
   const [threshold, setThreshold] = useState(70);
@@ -664,27 +1058,72 @@ export default function App() {
     setTimeout(() => setToast({ msg: "", type: "success" }), 4000);
   }, []);
 
+  // ── Load from Supabase on mount ─────────────────────────────────────────
+  useEffect(() => {
+    if (!supabaseEnabled) return;
+    (async () => {
+      setDbLoading(true);
+      try {
+        const [dbSources, dbMatches] = await Promise.all([loadSources(), loadMatches(50)]);
+        if (dbSources && Object.keys(dbSources).length > 0) {
+          // Merge: keep any initial categories not yet in DB
+          setSources(prev => {
+            const merged = { ...prev };
+            for (const [cat, items] of Object.entries(dbSources)) {
+              merged[cat] = items;
+            }
+            return merged;
+          });
+        }
+        if (dbMatches && dbMatches.length > 0) setMatches(dbMatches);
+      } catch (e) {
+        console.warn("Supabase load error:", e);
+      } finally {
+        setDbLoading(false);
+      }
+    })();
+  }, []);
+
+  // ── Run agent ──────────────────────────────────────────────────────────
   const handleRun = async () => {
     setRunning(true);
     setMatches([]);
     try {
-      const activeFunding = sources.funding.filter(s => s.active);
-      const activeNews    = [...sources.news, ...sources.political].filter(s => s.active);
+      const fundingSources = sources.funding?.filter(s => s.active) ?? [];
+      const newsSources    = [
+        ...(sources.news?.filter(s => s.active)     ?? []),
+        ...(sources.political?.filter(s => s.active) ?? []),
+      ];
+      // All other active sources (organizations, custom) passed as extraSources
+      const extraSources = Object.entries(sources)
+        .filter(([cat]) => !["funding", "news", "political"].includes(cat))
+        .flatMap(([cat, items]) => items.filter(s => s.active).map(s => ({ category: cat, ...s })));
 
       const res = await fetch("/api/match", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ profile, keywords, threshold, fundingSources: activeFunding, newsSources: activeNews }),
+        body: JSON.stringify({ profile, keywords, threshold, fundingSources, newsSources, extraSources }),
       });
 
       const data = await res.json();
       if (!res.ok) throw new Error(data.error || "Agent run failed");
 
-      setMatches(data.matches || []);
-      showToast(`Found ${data.matches?.length ?? 0} matches!`, "success");
+      const newMatches = data.matches || [];
+      setMatches(newMatches);
+      showToast(`Found ${newMatches.length} matches!`, "success");
       setTab("matches");
+
+      // Persist matches to Supabase
+      if (supabaseEnabled && newMatches.length) {
+        saveMatches(newMatches).catch(console.warn);
+      }
     } catch (e) {
-      showToast(e.message.includes("ANTHROPIC_API_KEY") ? "Add ANTHROPIC_API_KEY in Netlify → Environment variables" : e.message, "error");
+      showToast(
+        e.message.includes("ANTHROPIC_API_KEY")
+          ? "Add ANTHROPIC_API_KEY in Netlify → Environment variables"
+          : e.message,
+        "error"
+      );
     } finally {
       setRunning(false);
     }
@@ -722,6 +1161,8 @@ export default function App() {
           }}>⚡</div>
           <span style={{ fontWeight: 700, fontSize: 15, letterSpacing: "-0.01em" }}>Grant Intelligence</span>
           <Badge color={T.green}>Live</Badge>
+          {supabaseEnabled && <Badge color={T.accent}>DB</Badge>}
+          {dbLoading && <Spinner size={12} color={T.accent} />}
         </div>
 
         <nav style={{ display: "flex", gap: 4 }}>
@@ -749,7 +1190,7 @@ export default function App() {
 
       <main style={{ maxWidth: 1200, margin: "0 auto", padding: "32px 32px 64px" }}>
         {tab === "overview" && <OverviewTab sources={sources} matches={matches} />}
-        {tab === "sources"  && <SourcesTab  sources={sources} setSources={setSources} />}
+        {tab === "sources"  && <SourcesTab  sources={sources} setSources={setSources} showToast={showToast} />}
         {tab === "matching" && <MatchingTab profile={profile} setProfile={setProfile} keywords={keywords} setKeywords={setKeywords} threshold={threshold} setThreshold={setThreshold} />}
         {tab === "matches"  && <MatchesTab  matches={matches} deliveryEmail={deliveryEmail} showToast={showToast} />}
         {tab === "delivery" && <DeliveryTab deliveryEmail={deliveryEmail} setDeliveryEmail={setDeliveryEmail} />}

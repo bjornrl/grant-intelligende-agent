@@ -18,7 +18,8 @@ export default async (req: Request, context: Context) => {
     keywords: string[];
     threshold: number;
     fundingSources: { name: string; url: string; tag: string }[];
-    newsSources: { name: string; url: string }[];
+    newsSources:    { name: string; url: string }[];
+    extraSources?:  { category: string; name: string; url: string }[];
   };
 
   try {
@@ -30,31 +31,66 @@ export default async (req: Request, context: Context) => {
     });
   }
 
-  const { profile, keywords, threshold, fundingSources, newsSources } = body;
+  const { profile, keywords, threshold, fundingSources, newsSources, extraSources = [] } = body;
 
-  // Lean prompt — short response keeps it well within timeout
-  const prompt = `You are a Norwegian grant intelligence agent. Find 3 matches between funding programs and news topics.
+  // Build readable source lists for the prompt
+  const fundingList = fundingSources
+    .map(f => `  - ${f.name} (${f.tag ?? ""}) → ${f.url}`)
+    .join("\n");
 
-Org: "${profile.slice(0, 200)}"
-Keywords: ${keywords.slice(0, 6).join(", ")}
-Funding: ${fundingSources.map(f => f.name).join(", ")}
-News: ${newsSources.map(n => n.name).join(", ")}
-Min score: ${threshold}
+  const newsList = newsSources
+    .map(n => `  - ${n.name} → ${n.url}`)
+    .join("\n");
 
-Reply ONLY with a JSON array, no markdown:
-[{"score":85,"fund":"DAM – Forebyggende helse","news":"Psykisk helse blant unge (NRK)","insight":"one sentence in English","org":"Mental Helse Norge","contact":"post@mentalhelse.no","deadline":"2025-09-01","amount":"NOK 800 000","draft":"2-3 sentence Norwegian proposal summary","status":"new"}]`;
+  const extraList = extraSources.length
+    ? "\nExtra sources to consider:\n" +
+      extraSources.map(e => `  - [${e.category}] ${e.name} → ${e.url}`).join("\n")
+    : "";
+
+  const prompt = `You are a Norwegian grant intelligence agent.
+
+Organisation profile: "${profile.slice(0, 300)}"
+Keywords: ${keywords.slice(0, 8).join(", ")}
+Min match score: ${threshold}
+
+Funding sources (name → URL):
+${fundingList}
+
+News / political sources (name → URL):
+${newsList}${extraList}
+
+Find the 3–5 best matches between a funding source and a relevant news/political topic.
+For each match return one JSON object. Use the exact URLs provided above for fundUrl and newsUrl.
+For orgUrl, provide the best known website for the suggested recipient organisation.
+
+Reply ONLY with a valid JSON array (no markdown, no code fences):
+[{
+  "score": 85,
+  "fund": "DAM – Forebyggende helse",
+  "fundUrl": "https://www.dam.no/organisasjoner/",
+  "news": "Psykisk helse blant unge (NRK)",
+  "newsUrl": "https://www.nrk.no",
+  "insight": "one sentence in English explaining the alignment",
+  "org": "Mental Helse Norge",
+  "orgUrl": "https://www.mentalhelse.no",
+  "contact": "post@mentalhelse.no",
+  "deadline": "2025-09-01",
+  "amount": "NOK 800 000",
+  "draft": "2–3 sentence Norwegian proposal summary",
+  "status": "new"
+}]`;
 
   const response = await fetch("https://api.anthropic.com/v1/messages", {
     method: "POST",
     headers: {
-      "Content-Type": "application/json",
-      "x-api-key": ANTHROPIC_API_KEY,
+      "Content-Type":      "application/json",
+      "x-api-key":         ANTHROPIC_API_KEY,
       "anthropic-version": "2023-06-01",
     },
     body: JSON.stringify({
-      model: "claude-haiku-4-5-20251001",
-      max_tokens: 1500,
-      messages: [{ role: "user", content: prompt }],
+      model:      "claude-haiku-4-5-20251001",
+      max_tokens: 2000,
+      messages:   [{ role: "user", content: prompt }],
     }),
   });
 
@@ -87,6 +123,6 @@ Reply ONLY with a JSON array, no markdown:
 };
 
 export const config: Config = {
-  path: "/api/match",
+  path:    "/api/match",
   timeout: 30,
 };
