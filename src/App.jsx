@@ -1118,10 +1118,13 @@ export default function App() {
         saveMatches(newMatches).catch(console.warn);
       }
     } catch (e) {
+      const msg = e.message || "";
       showToast(
-        e.message.includes("ANTHROPIC_API_KEY")
+        msg.includes("ANTHROPIC_API_KEY")
           ? "Add ANTHROPIC_API_KEY in Netlify → Environment variables"
-          : e.message,
+          : msg.includes("overloaded") || msg.includes("temporarily")
+          ? "Claude is currently overloaded — please wait a moment and try again."
+          : msg || "Agent run failed",
         "error"
       );
     } finally {

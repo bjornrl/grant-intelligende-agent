@@ -1,5 +1,37 @@
 import type { Context, Config } from "@netlify/functions";
 
+// Retry the Anthropic API call up to `maxAttempts` times on 529 Overloaded errors.
+async function callAnthropic(
+  apiKey: string,
+  payload: unknown,
+  maxAttempts = 3,
+): Promise<Response> {
+  const delays = [1000, 2000, 4000]; // ms between retries
+  let lastResponse: Response | null = null;
+
+  for (let attempt = 0; attempt < maxAttempts; attempt++) {
+    const res = await fetch("https://api.anthropic.com/v1/messages", {
+      method: "POST",
+      headers: {
+        "Content-Type":      "application/json",
+        "x-api-key":         apiKey,
+        "anthropic-version": "2023-06-01",
+      },
+      body: JSON.stringify(payload),
+    });
+
+    // Success or a non-retryable error — return immediately
+    if (res.ok || res.status !== 529) return res;
+
+    lastResponse = res;
+    if (attempt < maxAttempts - 1) {
+      await new Promise(r => setTimeout(r, delays[attempt]));
+    }
+  }
+
+  return lastResponse!;
+}
+
 export default async (req: Request, context: Context) => {
   if (req.method !== "POST") {
     return new Response("Method not allowed", { status: 405 });
@@ -80,24 +112,26 @@ Reply ONLY with a valid JSON array (no markdown, no code fences):
   "status": "new"
 }]`;
 
-  const response = await fetch("https://api.anthropic.com/v1/messages", {
-    method: "POST",
-    headers: {
-      "Content-Type":      "application/json",
-      "x-api-key":         ANTHROPIC_API_KEY,
-      "anthropic-version": "2023-06-01",
-    },
-    body: JSON.stringify({
-      model:      "claude-haiku-4-5-20251001",
-      max_tokens: 2000,
-      messages:   [{ role: "user", content: prompt }],
-    }),
+  const response = await callAnthropic(ANTHROPIC_API_KEY, {
+    model:      "claude-haiku-4-5-20251001",
+    max_tokens: 2000,
+    messages:   [{ role: "user", content: prompt }],
   });
 
   if (!response.ok) {
-    const err = await response.text();
-    return new Response(JSON.stringify({ error: `Anthropic API error: ${err}` }), {
-      status: 502,
+    let errBody: { type?: string; error?: { type?: string; message?: string } } = {};
+    try { errBody = await response.json(); } catch { /* ignore */ }
+
+    const isOverloaded =
+      response.status === 529 ||
+      errBody?.error?.type === "overloaded_error";
+
+    const message = isOverloaded
+      ? "Claude API is temporarily overloaded — please wait a moment and try again."
+      : (errBody?.error?.message ?? `Anthropic API error (${response.status})`);
+
+    return new Response(JSON.stringify({ error: message }), {
+      status: isOverloaded ? 503 : 502,
       headers: { "Content-Type": "application/json" },
     });
   }
@@ -124,5 +158,5 @@ Reply ONLY with a valid JSON array (no markdown, no code fences):
 
 export const config: Config = {
   path:    "/api/match",
-  timeout: 30,
+  timeout: 60, // allow up to 3 retries with backoff on overloaded errors
 };
